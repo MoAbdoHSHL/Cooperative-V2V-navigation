@@ -9,3 +9,6 @@ helping them build a shared picture of what’s happening on the road.
 others report too.
 * cooperative navigation: cars helping each other understand and move safely through a shared 
 environment
+
+![image](https://github.com/user-attachments/assets/ebae07b8-5369-4b4b-80d6-2a03be0eeebc)
+Fig_src:https://www.yallamotor.com/news/what-is-vehicle-to-vehicle-technology-and-how-does-it-work-5178
