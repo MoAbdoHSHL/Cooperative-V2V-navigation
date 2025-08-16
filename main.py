@@ -11,59 +11,46 @@ import serial
 
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENCV_VIDEOIO_DEBUG'] = '0'
-
-# Constants and configurations
 class_names = ['pathholde', 'Manholde', 'Duck', 'Snow', 'Stop']
-
-# ------------------ MOTOR SETUP ------------------
 IN1, IN2, IN3, IN4 = 17, 27, 22, 23
 ENA, ENB = 18, 13
-
-# ----------------- SERVO SETUP -------------------
-SERVO_PIN = 12  # GPIO 12 (Pin 32)
+SERVO_PIN = 12
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(SERVO_PIN, GPIO.OUT)
-pwm = GPIO.PWM(SERVO_PIN, 50)  # 50 Hz
+pwm = GPIO.PWM(SERVO_PIN, 50)
 pwm.start(0)
-
-current_angle = 10  # Track current angle for visualization
+current_angle = 10
 scan_data = {}
 data_lock = threading.Lock()
-target_angle = 10  # Track where servo is moving to
-
-# ----------------- LIDAR SETUP -------------------
+target_angle = 10
 ser = serial.Serial("/dev/serial0", baudrate=115200, timeout=0.1)
 HEADER = 0x59
-
-# Initialize GPIO for motors
 GPIO.setup(IN1, GPIO.OUT)
 GPIO.setup(IN2, GPIO.OUT)
 GPIO.setup(IN3, GPIO.OUT)
 GPIO.setup(IN4, GPIO.OUT)
 GPIO.setup(ENA, GPIO.OUT)
 GPIO.setup(ENB, GPIO.OUT)
-
-# Initialize motor PWMs
 pwmA = GPIO.PWM(ENA, 1000)
 pwmB = GPIO.PWM(ENB, 1000)
 pwmA.start(0)
 pwmB.start(0)
-
-# Global control variables
 object_detected = False
 stop_requested = False
 running = True
+RIGHT_MOTOR_FACTOR = 1.5  # Adjust until both motors move equally
 
-# ----------------- MOTOR FUNCTIONS ------------------
-def motor_forward(speed_left=2, speed_right=2):
+def motor_forward(speed_left=18, speed_right=18):
+    # Both motors forward
     GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.HIGH)   # Left motor forward
     GPIO.output(IN3, GPIO.LOW)
-    GPIO.output(IN4, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.HIGH)   # Right motor forward
     pwmA.ChangeDutyCycle(speed_left)
-    pwmB.ChangeDutyCycle(speed_right)
+    pwmB.ChangeDutyCycle(min(speed_right * RIGHT_MOTOR_FACTOR, 100))
 
 def motor_stop():
+    # Both motors stop
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.LOW)
     GPIO.output(IN3, GPIO.LOW)
@@ -71,41 +58,41 @@ def motor_stop():
     pwmA.ChangeDutyCycle(0)
     pwmB.ChangeDutyCycle(0)
 
-def motor_turn_left(speed_left=2, speed_right=5):
+def motor_turn_right(speed=75):
+    # Stop left, right keeps forward 
     GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.HIGH)
-    GPIO.output(IN3, GPIO.HIGH)
-    GPIO.output(IN4, GPIO.LOW)
-    pwmA.ChangeDutyCycle(speed_left)   # Left wheel slower
-    pwmB.ChangeDutyCycle(speed_right)  # Right wheel faster
+    GPIO.output(IN2, GPIO.LOW)     # Left motor OFF
+    pwmA.ChangeDutyCycle(0)
 
-def motor_turn_right(speed_left=5, speed_right=2):
-    GPIO.output(IN1, GPIO.HIGH)
-    GPIO.output(IN2, GPIO.LOW)
     GPIO.output(IN3, GPIO.LOW)
-    GPIO.output(IN4, GPIO.HIGH)
-    pwmA.ChangeDutyCycle(speed_left)   # Left wheel faster
-    pwmB.ChangeDutyCycle(speed_right)  # Right wheel slower
+    GPIO.output(IN4, GPIO.HIGH)    # Right motor forward
+    pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
-# ----------------- SERVO FUNCTIONS ------------------
+def motor_turn_left(speed=75):
+    # Left keeps forward, stop right
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)    # Left motor forward
+    pwmA.ChangeDutyCycle(speed)
+
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)     # Right motor OFF
+    pwmB.ChangeDutyCycle(0)
+
+
 def set_angle(angle):
     duty = 2 + (angle / 18)
     pwm.ChangeDutyCycle(duty)
     time.sleep(0.2)
     pwm.ChangeDutyCycle(0)
-
 def servo_loop():
     global target_angle, running
     while running:
         target_angle = 10
-        set_angle(10)    # Full Left
+        set_angle(10)
         time.sleep(0.1)
-        
         target_angle = 170
-        set_angle(170)   # Full Right
+        set_angle(170)
         time.sleep(0.1)
-
-# ----------------- LIDAR FUNCTIONS ------------------
 def read_frame():
     while True:
         b = ser.read(1)
@@ -125,56 +112,39 @@ def read_frame():
                     dist = uart[2] + (uart[3] << 8)
                     strength = uart[4] + (uart[5] << 8)
                     return dist, strength
-
 def lidar_loop():
     global scan_data, current_angle, stop_requested, running
-    
-    # Simulation of servo movement for angle tracking
     last_target = target_angle
     movement_start_time = time.time()
     start_angle = current_angle
-    
     while running:
         try:
             dist, strength = read_frame()
-            
-            # Simulate servo movement for angle estimation
             if target_angle != last_target:
                 movement_start_time = time.time()
                 start_angle = current_angle
                 last_target = target_angle
-            
-            # Estimate current angle based on movement time
             movement_time = time.time() - movement_start_time
-            if movement_time < 0.2:  # During the 0.2s movement period
+            if movement_time < 0.2:
                 progress = movement_time / 0.2
                 current_angle = start_angle + (target_angle - start_angle) * progress
             else:
                 current_angle = target_angle
-            
-            # Only store valid readings (changed to >= 5 to include 5cm)
             if dist >= 5 and dist <= 400:
                 with data_lock:
-                    # Store only the latest reading for each angle
                     scan_data[current_angle] = {
                         'distance': min(dist, 200),
                         'strength': strength,
                         'timestamp': time.time()
                     }
-            
-            # Emergency stop if obstacle too close
             if 0 < dist <= 30:
                 stop_requested = True
             else:
-                stop_requested = False  # Clear stop if no close object
-            
+                stop_requested = False
             time.sleep(0.002)
-            
         except Exception as e:
             print(f"LIDAR error: {e}")
             time.sleep(0.01)
-
-# ----------------- CAMERA FUNCTIONS -----------------
 def initialize_camera():
     picam2 = Picamera2()
     config = picam2.create_preview_configuration(
@@ -187,14 +157,12 @@ def initialize_camera():
     time.sleep(2)
     picam2.set_controls({"ScalerCrop": (0, 0, 4608, 2592)})
     return picam2
-
 def initialize_model():
     model = YOLO("/home/mohamed/Desktop/Code/runs/detect/train2/weights/best.pt").to("cpu")
     model.fuse()
     model.amp = True
     _ = model(np.zeros((160, 160, 3), dtype=np.uint8), imgsz=160, verbose=False)
     return model
-
 class FrameCaptureThread(threading.Thread):
     def __init__(self, camera):
         super().__init__()
@@ -202,34 +170,26 @@ class FrameCaptureThread(threading.Thread):
         self.latest_frame = None
         self.lock = threading.Lock()
         self.running = True
-
     def run(self):
         while self.running:
             frame = self.camera.capture_array()
             with self.lock:
                 self.latest_frame = frame
             time.sleep(0.05)
-
     def get_frame(self):
         with self.lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
-
     def stop(self):
         self.running = False
-
-# ----------------- VISION PROCESSING -----------------
 def process_frame(frame, model):
     global object_detected, stop_requested
-    
     results = model(frame, imgsz=160, conf=0.5, half=True, verbose=False)
     result = results[0]
     annotated_frame = frame.copy()
-    
-    # Check if any of our target classes are detected
     for box in result.boxes:
         cls_id = int(box.cls[0])
         conf = float(box.conf[0])
-        if conf > 0.5:  # Only consider confident detections
+        if conf > 0.5:
             object_detected = True
             stop_requested = True
             label = f"{class_names[cls_id]} {conf:.2f}"
@@ -237,155 +197,112 @@ def process_frame(frame, model):
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(annotated_frame, label, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    
     return annotated_frame
-
 def detect_lanes(frame):
-    """Process frame to detect lanes and return steering angle"""
-    # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    
-    # Apply Gaussian blur
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Threshold to isolate white lanes
-    _, thresh = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
-    
-    # Apply region of interest mask (focus on lower half of image)
-    height, width = thresh.shape
-    mask = np.zeros_like(thresh)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+    lower_white = np.array([0, 0, 200])
+    upper_white = np.array([180, 30, 255])
+    mask = cv2.inRange(hsv, lower_white, upper_white)
+    height, width = mask.shape[:2]
+    roi_mask = np.zeros_like(mask)
     polygon = np.array([[
-        (0, height),
-        (width, height),
-        (width, height // 2),
-        (0, height // 2),
+        (int(0.05 * width), height),
+        (int(0.3 * width), int(0.6 * height)),
+        (int(0.7 * width), int(0.6 * height)),
+        (int(0.95 * width), height)
     ]], np.int32)
-    cv2.fillPoly(mask, polygon, 255)
-    masked = cv2.bitwise_and(thresh, mask)
-    
-    # Detect edges
-    edges = cv2.Canny(masked, 50, 150)
-    
-    # Detect lines using Hough Transform
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
-                           minLineLength=50, maxLineGap=100)
-    
-    # Process lines to find lanes
+    cv2.fillPoly(roi_mask, polygon, 255)
+    masked_img = cv2.bitwise_and(mask, roi_mask)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    cleaned_mask = cv2.morphologyEx(masked_img, cv2.MORPH_OPEN, kernel)
+    lines = cv2.HoughLinesP(
+        cleaned_mask,
+        rho=1,
+        theta=np.pi/180,
+        threshold=20,
+        minLineLength=20,
+        maxLineGap=20
+    )
+    debug_img = cv2.cvtColor(cleaned_mask, cv2.COLOR_GRAY2BGR)
     left_lines = []
     right_lines = []
-    
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            if x1 == x2:  # Skip vertical lines
-                continue
-            slope = (y2 - y1) / (x2 - x1)
-            if abs(slope) < 0.5:  # Skip near-horizontal lines
-                continue
-            if slope < 0:
-                left_lines.append(line[0])
-            else:
-                right_lines.append(line[0])
-    
-    # Calculate average lines
-    left_avg = np.mean(left_lines, axis=0) if left_lines else None
-    right_avg = np.mean(right_lines, axis=0) if right_lines else None
-    
-    # Calculate steering angle
-    steering_angle = 90  # Neutral position
-    
-    if left_avg is not None and right_avg is not None:
-        # Both lanes detected - drive between them
-        left_x = (left_avg[0] + left_avg[2]) // 2
-        right_x = (right_avg[0] + right_avg[2]) // 2
-        center = (left_x + right_x) // 2
-        steering_angle = 90 + (center - width // 2) // 10  # Scale the offset
-        
-    elif left_avg is not None:
-        # Only left lane detected - follow it with offset
-        left_x = (left_avg[0] + left_avg[2]) // 2
-        steering_angle = 90 + (left_x + 100 - width // 2) // 10  # Offset to right
-        
-    elif right_avg is not None:
-        # Only right lane detected - follow it with offset
-        right_x = (right_avg[0] + right_avg[2]) // 2
-        steering_angle = 90 + (right_x - 100 - width // 2) // 10  # Offset to left
-    
-    # Constrain steering angle
-    steering_angle = np.clip(steering_angle, 60, 120)
-    
-    return steering_angle, edges
-
-# ----------------- MAIN CONTROL LOOP -----------------
+            if x2 != x1:
+                slope = (y2 - y1) / (x2 - x1)
+                intercept = y1 - slope * x1
+                if slope < -0.3:
+                    left_lines.append((slope, intercept))
+                    cv2.line(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                elif slope > 0.3:
+                    right_lines.append((slope, intercept))
+                    cv2.line(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    left_lane = np.average(left_lines, axis=0) if left_lines else None
+    right_lane = np.average(right_lines, axis=0) if right_lines else None
+    steering_angle = 90
+    if left_lane is not None and right_lane is not None:
+        slope_left, intercept_left = left_lane
+        slope_right, intercept_right = right_lane
+        y = height
+        x_left = (y - intercept_left) / slope_left
+        x_right = (y - intercept_right) / slope_right
+        center = (x_left + x_right) / 2
+        deviation = (center - width/2) / (width/2)
+        steering_angle = 90 + deviation * 30
+    elif left_lane is not None:
+        steering_angle = 105
+    elif right_lane is not None:
+        steering_angle = 75
+    return steering_angle, debug_img
 def main():
     global running, stop_requested, object_detected
-    
-    # Initialize hardware
     camera = initialize_camera()
     model = initialize_model()
-    
-    # Start threads
     frame_thread = FrameCaptureThread(camera)
-    frame_thread.start()
-    
+    frame_thread.start()   
     servo_thread = threading.Thread(target=servo_loop)
     servo_thread.daemon = True
     servo_thread.start()
-    
     lidar_thread = threading.Thread(target=lidar_loop)
     lidar_thread.daemon = True
     lidar_thread.start()
-    
     try:
         frame_count = 0
-        base_speed = 12  # Base motor speed
-        
+        base_speed = 18
         while True:
             frame = frame_thread.get_frame()
             if frame is None:
                 continue
-                
             frame_count += 1
             if frame_count % 2 != 0:
                 continue
-                
-            # Process frame for object detection
             start_time = time.time()
             annotated = process_frame(frame, model)
             print(f"Inference time: {time.time() - start_time:.2f} sec")
-            
-            # Lane detection and steering
             if not stop_requested:
                 steering_angle, lane_debug = detect_lanes(frame)
-                
-                # Adjust motor based on steering angle
-                if steering_angle < 85:  # Sharp left turn
+                if steering_angle < 85:
                     motor_turn_left(base_speed)
-                elif steering_angle > 95:  # Sharp right turn
+                elif steering_angle > 95:
                     motor_turn_right(base_speed)
-                else:  # Go straight
+                else:
                     motor_forward(base_speed, base_speed)
             else:
-                # Emergency stop
                 motor_stop()
-                if not object_detected:  # If stopped by LIDAR but no object detected
-                    stop_requested = False  # Resume after a delay
+                if not object_detected:
+                    stop_requested = False
                     time.sleep(1)
-                else:  # If stopped by object detection
+                else:
                     print("Object detected - stopped!")
-                    time.sleep(3)  # Wait before resuming
+                    time.sleep(3)
                     object_detected = False
                     stop_requested = False
-            
-            # Display results
             cv2.imshow("Road Hazard Detection", annotated)
             cv2.imshow("Lane Detection", lane_debug)
-            
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
-                
     finally:
-        # Cleanup
         running = False
         frame_thread.stop()
         frame_thread.join()
@@ -397,6 +314,7 @@ def main():
         camera.stop()
         cv2.destroyAllWindows()
         ser.close()
-
 if __name__ == "__main__":
     main()
+
+
