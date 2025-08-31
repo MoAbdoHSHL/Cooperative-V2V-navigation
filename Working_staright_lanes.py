@@ -1,3 +1,4 @@
+
 import os
 import threading
 import time
@@ -271,34 +272,41 @@ def process_frame(frame, model):
     results = model(frame, imgsz=160, conf=0.5, half=True, verbose=False)
     result = results[0]
     annotated_frame = frame.copy()
-    current_detections = set()
-    
+    detected_class = None
+
+    # Look for any object
     for box in result.boxes:
         cls_id = int(box.cls[0])
         conf = float(box.conf[0])
         if conf > 0.5:
-            class_name = class_names[cls_id]
-            current_detections.add(class_name)
-            
-            label = f"{class_name} {conf:.2f}"
+            detected_class = class_names[cls_id]
+
+            # Draw box + label
+            label = f"{detected_class} {conf:.2f}"
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(annotated_frame, label, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    
- 
+            break  # stop after first valid detection
+
     with mqtt_lock:
-        if "pathholde" in current_detections:
-            last_detected_class = "pathholde"
+        if detected_class:  
+            # 🚨 Object detected -> request stop (keeps motor stopped in main loop)
+            last_detected_class = detected_class
+            stop_requested = True
+            object_detected = True
             new_detection = True
-        elif current_detections:  # Other objects
-            last_detected_class = list(current_detections)[0]  # Send first detected class
-            new_detection = True
-        else:  # No detections
+            print(f"DETECTED: {detected_class} -> Stopping + MQTT STOP")
+        else:
+            # ✅ No detections -> release stop
             last_detected_class = "clear"
+            stop_requested = False
+            object_detected = False
             new_detection = True
-    
+            print("CLEAR -> Resume driving + MQTT CLEAR")
+
     return annotated_frame
+
 
 ############ here ######
 def preprocess_frame(frame):
@@ -485,7 +493,7 @@ def main():
                     time.sleep(0.1)
                 else:
                     print("Object detected - stopped!")
-                    time.sleep(3)
+                    time.sleep(5)
                     object_detected = False
                     stop_requested = False
             cv2.imshow("Road Hazard Detection", annotated)
