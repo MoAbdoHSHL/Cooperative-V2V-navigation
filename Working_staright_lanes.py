@@ -10,7 +10,7 @@ from ultralytics import YOLO
 import RPi.GPIO as GPIO
 import serial
 import paho.mqtt.client as mqtt
-
+import math
 
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENCV_VIDEOIO_DEBUG'] = '0'
@@ -82,8 +82,7 @@ def motor_stop():
     pwmB.ChangeDutyCycle(0)
     time.sleep(0.5)
     
-import time
-import math
+
 
 def smooth_ramp(start, end, steps, i):
     return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
@@ -297,6 +296,7 @@ def process_frame(frame, model):
             object_detected = True
             new_detection = True
             print(f"DETECTED: {detected_class} -> Stopping + MQTT STOP")
+            motor_stop()
         else:
             # ✅ No detections -> release stop
             last_detected_class = "clear"
