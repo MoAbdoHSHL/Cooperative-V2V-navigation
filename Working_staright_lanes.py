@@ -19,7 +19,7 @@ class_names = ['pathholde', 'Manholde', 'Duck', 'Snow', 'Stop']
 IN1, IN2, IN3, IN4 = 17, 27, 22, 23
 ENA, ENB = 18, 13
 SERVO_PIN = 12
-RIGHT_MOTOR_FACTOR = 1.5
+RIGHT_MOTOR_FACTOR = 1.0
 
 
 BROKER_IP = "172.20.10.13"  # Pi_2 (broker)
@@ -81,7 +81,7 @@ def motor_stop():
     pwmB.ChangeDutyCycle(0)
     time.sleep(0.5)
     
-def motor_turn_right(speed=50):
+def motor_turn_right(speed=60):
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.LOW)     # Left motor OFF
     pwmA.ChangeDutyCycle(0)
@@ -89,7 +89,9 @@ def motor_turn_right(speed=50):
     GPIO.output(IN4, GPIO.HIGH)    # Right motor forward
     pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
-def motor_turn_left(speed=75):
+####here prob####
+    
+def motor_turn_left(speed=60):
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)    # Left motor forward
     pwmA.ChangeDutyCycle(speed)
@@ -306,9 +308,9 @@ def detect_lines(cleaned_mask):
         cleaned_mask,
         rho=1,
         theta=np.pi / 180,
-        threshold=30,
-        minLineLength=90,
-        maxLineGap=8
+        threshold=20,
+        minLineLength=80,
+        maxLineGap=30
     )
     return lines
 
@@ -405,8 +407,8 @@ def main():
     
     try:
         frame_count = 0
-        base_speed = 15
-        steer_speed = 18
+        base_speed = 18
+        steer_speed = 20
         
         while True:
             frame = frame_thread.get_frame()
@@ -428,27 +430,27 @@ def main():
                     motor_forward(base_speed, base_speed)
                 # Turn left if only left lane detected
                 elif left_lane:
-                    motor_turn_right(steer_speed)
+                    motor_turn_right(steer_speed*1.5)
                     time.sleep(0.05)
                 # Turn right if only right lane detected
                 elif right_lane:
-                    motor_turn_left(steer_speed)
-                    time.sleep(0.05)
+                    motor_turn_left(base_speed)
+                    #time.sleep(0.5)
                 # Default behavior if no lanes detected
                 else:
                     if steering_angle < 85:
                         motor_turn_right(steer_speed)
-                        time.sleep(0.05)
+                        time.sleep(0.5)
                     elif steering_angle > 95:
                         motor_turn_left(steer_speed)
-                        time.sleep(0.05)
+                        time.sleep(0.5)
                     else:
                         motor_forward(base_speed, base_speed)
             else:
                 motor_stop()
                 if not object_detected:
                     stop_requested = False
-                    time.sleep(1)
+                    time.sleep(0.1)
                 else:
                     print("Object detected - stopped!")
                     time.sleep(3)
