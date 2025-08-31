@@ -81,23 +81,55 @@ def motor_stop():
     pwmB.ChangeDutyCycle(0)
     time.sleep(0.5)
     
-def motor_turn_right(speed=60):
+import time
+import math
+
+def smooth_ramp(start, end, steps, i):
+    return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
+
+
+def motor_turn_right(speed=60, ramp_time=0.2, step_delay=0.002, start_speed=20):
     GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.LOW)     # Left motor OFF
-    pwmA.ChangeDutyCycle(0)
+    GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
-    GPIO.output(IN4, GPIO.HIGH)    # Right motor forward
+    GPIO.output(IN4, GPIO.HIGH)   # Right forward
+
+    steps = int(ramp_time / step_delay)
+    for i in range(1, steps + 1):
+        # Left motor ramps DOWN
+        left_speed = smooth_ramp(speed, speed * 0.3, steps, i)
+        pwmA.ChangeDutyCycle(left_speed)
+
+        # Right motor ramps UP
+        right_speed = smooth_ramp(start_speed, speed, steps, i)
+        pwmB.ChangeDutyCycle(min(right_speed * RIGHT_MOTOR_FACTOR, 100))
+
+        time.sleep(step_delay)
+
+    pwmA.ChangeDutyCycle(speed * 0.3)
     pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
-####here prob####
-    
-def motor_turn_left(speed=60):
+
+def motor_turn_left(speed=75, ramp_time=0.2, step_delay=0.002, start_speed=25):
     GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.HIGH)    # Left motor forward
-    pwmA.ChangeDutyCycle(speed)
+    GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
-    GPIO.output(IN4, GPIO.LOW)     # Right motor OFF
-    pwmB.ChangeDutyCycle(0)
+    GPIO.output(IN4, GPIO.HIGH)   # Right forward
+
+    steps = int(ramp_time / step_delay)
+    for i in range(1, steps + 1):
+        # Right motor ramps DOWN
+        right_speed = smooth_ramp(speed, speed * 0.3, steps, i)
+        pwmB.ChangeDutyCycle(right_speed)
+
+        # Left motor ramps UP
+        left_speed = smooth_ramp(start_speed, speed, steps, i)
+        pwmA.ChangeDutyCycle(left_speed)
+
+        time.sleep(step_delay)
+
+    pwmA.ChangeDutyCycle(speed)
+    pwmB.ChangeDutyCycle(speed * 0.3)
 
 
 def set_angle(angle):
@@ -285,8 +317,8 @@ def region_of_interest(mask):
 
     polygon = np.array([[
         (int(0.00 * width), height),
-        (int(0.30 * width), int(0.25 * height)),
-        (int(0.70 * width), int(0.25 * height)),
+        (int(0.40 * width), int(0.15 * height)),
+        (int(0.60 * width), int(0.15 * height)),
         (int(1.00 * width), height)
     ]], np.int32)
 
@@ -408,7 +440,7 @@ def main():
     try:
         frame_count = 0
         base_speed = 18
-        steer_speed = 20
+        steer_speed = 30
         
         while True:
             frame = frame_thread.get_frame()
@@ -430,12 +462,12 @@ def main():
                     motor_forward(base_speed, base_speed)
                 # Turn left if only left lane detected
                 elif left_lane:
-                    motor_turn_right(steer_speed*1.5)
+                    motor_turn_right(steer_speed)
                     time.sleep(0.05)
                 # Turn right if only right lane detected
                 elif right_lane:
-                    motor_turn_left(base_speed)
-                    #time.sleep(0.5)
+                    motor_turn_left(steer_speed*.8)
+                    time.sleep(0.05)
                 # Default behavior if no lanes detected
                 else:
                     if steering_angle < 85:
