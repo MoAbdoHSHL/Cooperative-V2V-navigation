@@ -88,16 +88,16 @@ def smooth_ramp(start, end, steps, i):
     return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
 
 
-def motor_turn_right(speed=60, ramp_time=0.2, step_delay=0.002, start_speed=20):
+def motor_turn_right(speed=60, ramp_time=0.001, step_delay=0.003, start_speed=20):
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
     GPIO.output(IN4, GPIO.HIGH)   # Right forward
 
-    steps = int(ramp_time / step_delay)
+    steps = int(ramp_time / step_delay)  
     for i in range(1, steps + 1):
         # Left motor ramps DOWN
-        left_speed = smooth_ramp(speed, speed * 0.3, steps, i)
+        left_speed = smooth_ramp(speed, speed * 0.5, steps, i)
         pwmA.ChangeDutyCycle(left_speed)
 
         # Right motor ramps UP
@@ -110,7 +110,7 @@ def motor_turn_right(speed=60, ramp_time=0.2, step_delay=0.002, start_speed=20):
     pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
 
-def motor_turn_left(speed=75, ramp_time=0.2, step_delay=0.002, start_speed=25):
+def motor_turn_left(speed=75, ramp_time=0.001, step_delay=0.003, start_speed=25):
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
@@ -119,7 +119,7 @@ def motor_turn_left(speed=75, ramp_time=0.2, step_delay=0.002, start_speed=25):
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
         # Right motor ramps DOWN
-        right_speed = smooth_ramp(speed, speed * 0.3, steps, i)
+        right_speed = smooth_ramp(speed, speed * 0.5 , steps, i)
         pwmB.ChangeDutyCycle(right_speed)
 
         # Left motor ramps UP
