@@ -20,9 +20,10 @@ class_names = ['pathholde', 'Manholde', 'Duck', 'Snow', 'Stop']
 IN1, IN2, IN3, IN4 = 17, 27, 22, 23
 ENA, ENB = 18, 13
 SERVO_PIN = 12
-RIGHT_MOTOR_FACTOR = 1.0
+RIGHT_MOTOR_FACTOR = 0.75  # boost right motor speed
 
-# ---- MQTT Subscriber settings ----
+
+# ---- MQTT Subscriber settings ---lidar_loop-
 BROKER_IP = "172.20.10.13"  # Broker Pi
 TOPIC_SUB = "servo/control"  # Topic for commands
 
@@ -32,6 +33,7 @@ last_lane_width = None
 last_confidence = 0.0
 
 # ---- GPIO setup ----
+
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(SERVO_PIN, GPIO.OUT)
 pwm = GPIO.PWM(SERVO_PIN, 50)
@@ -67,13 +69,13 @@ last_detected_class = None
 new_detection = False
 
 # ---- Motor functions ----
-def motor_forward(speed_left=18, speed_right=18):
+def motor_forward(speed_left=20, speed_right=20):
     GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.HIGH)   # Left forward
+    GPIO.output(IN2, GPIO.HIGH)
     GPIO.output(IN3, GPIO.LOW)
-    GPIO.output(IN4, GPIO.HIGH)   # Right forward
+    GPIO.output(IN4, GPIO.HIGH)
     pwmA.ChangeDutyCycle(speed_left)
-    pwmB.ChangeDutyCycle(min(speed_right * RIGHT_MOTOR_FACTOR, 100))
+    pwmB.ChangeDutyCycle(speed_right * RIGHT_MOTOR_FACTOR)
 
 is_stopped = False
 
@@ -88,13 +90,22 @@ def motor_stop():
 def smooth_ramp(start, end, steps, i):
     return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
 
-def motor_turn_right(speed=60, ramp_time=0.001, step_delay=0.003, start_speed=20):
+# Add these globals somewhere in your code
+lane_left_active = False
+lane_right_active = False
+stop_on_spot = False  # already exists
+
+def motor_turn_right(speed=40, ramp_time=0.05, step_delay=0.01, start_speed=25):
+    global lane_left_active
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)
     GPIO.output(IN3, GPIO.LOW)
     GPIO.output(IN4, GPIO.HIGH)
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
+        # interrupt ramp if lane is gone
+        if not lane_left_active or stop_on_spot:
+            break
         left_speed = smooth_ramp(speed, speed * 0.5, steps, i)
         right_speed = smooth_ramp(start_speed, speed, steps, i)
         pwmA.ChangeDutyCycle(left_speed)
@@ -103,20 +114,30 @@ def motor_turn_right(speed=60, ramp_time=0.001, step_delay=0.003, start_speed=20
     pwmA.ChangeDutyCycle(speed * 0.3)
     pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
-def motor_turn_left(speed=75, ramp_time=0.001, step_delay=0.003, start_speed=25):
+
+def motor_turn_left(speed=70, ramp_time=0.05, step_delay=0.01, start_speed=5):
+    global lane_right_active
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)
     GPIO.output(IN3, GPIO.LOW)
     GPIO.output(IN4, GPIO.HIGH)
+
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
-        right_speed = smooth_ramp(speed, speed * 0.5 , steps, i)
-        left_speed = smooth_ramp(start_speed, speed, steps, i)
-        pwmB.ChangeDutyCycle(right_speed)
+        if not lane_right_active or stop_on_spot:
+            break
+        # Ramp left and right motors gradually
+        left_speed  = smooth_ramp(start_speed, speed, steps, i)
+        right_speed = smooth_ramp(start_speed * 0.5, speed * 0.3, steps, i)
         pwmA.ChangeDutyCycle(left_speed)
+        pwmB.ChangeDutyCycle(right_speed)
         time.sleep(step_delay)
-    pwmA.ChangeDutyCycle(speed)
+
+    # final slow-down at end
+    pwmA.ChangeDutyCycle(speed * 0.8)
     pwmB.ChangeDutyCycle(speed * 0.3)
+
+
 
 # ---- Servo functions ----
 def set_angle(angle):
@@ -154,34 +175,31 @@ def read_frame():
                     return dist, strength
 
 def lidar_loop():
-    global scan_data, current_angle, stop_requested, running
-    last_target = target_angle
-    movement_start_time = time.time()
-    start_angle = current_angle
+    global scan_data, stop_on_spot, running
     while running:
         try:
             dist, strength = read_frame()
-            if target_angle != last_target:
-                movement_start_time = time.time()
-                start_angle = current_angle
-                last_target = target_angle
-            movement_time = time.time() - movement_start_time
-            if movement_time < 0.2:
-                progress = movement_time / 0.2
-                current_angle = start_angle + (target_angle - start_angle) * progress
-            else:
-                current_angle = target_angle
-            if dist >= 5 and dist <= 400:
+
+            if 5 <= dist <= 400:
                 with data_lock:
-                    scan_data[current_angle] = {'distance': min(dist, 200),'strength': strength,'timestamp': time.time()}
+                    scan_data[0] = {'distance': min(dist, 200), 'strength': strength, 'timestamp': time.time()}
+
+            # STOP detection
             if 0 < dist <= 30:
-                stop_requested = True
+                if not stop_on_spot:
+                    print(f"[LIDAR] Object detected at {dist} cm -> STOP")
+                stop_on_spot = True
             else:
-                stop_requested = False
+                if stop_on_spot:
+                    print(f"[LIDAR] Path clear ({dist} cm) -> RESUME")
+                stop_on_spot = False
+
             time.sleep(0.002)
         except Exception as e:
             print(f"LIDAR error: {e}")
             time.sleep(0.01)
+
+
 
 # ---- Camera & model ----
 def initialize_camera():
@@ -327,11 +345,12 @@ def mqtt_subscriber_thread():
 stop_until = 0
 
 def process_frame(frame, model):
-    global last_detected_class, stop_until
+    global last_detected_class, stop_until, stop_on_spot
     results = model(frame, imgsz=160, conf=0.5, half=True, verbose=False)
     result = results[0]
     annotated_frame = frame.copy()
     detected_class = None
+    
 
     for box in result.boxes:
         cls_id = int(box.cls[0])
@@ -348,10 +367,11 @@ def process_frame(frame, model):
     # Extend stop timer only if object detected
     if detected_class:
         last_detected_class = detected_class
-        stop_until = max(stop_until, time.time() + 3)
-        print(f"DETECTED: {detected_class} -> Stopping 3s")
+        stop_on_spot = True   # keep stopping until object disappears
     else:
         last_detected_class = "clear"
+        stop_on_spot = False
+
 
     return annotated_frame
 
@@ -386,8 +406,8 @@ def main():
 
     try:
         frame_count = 0
-        base_speed = 18
-        steer_speed = 30
+        base_speed = 20
+        steer_speed = 25
 
         # Main driving loop
         while True:
@@ -408,7 +428,7 @@ def main():
                 elif left_lane:
                     motor_turn_right(steer_speed)
                 elif right_lane:
-                    motor_turn_left(steer_speed * 0.8)
+                    motor_turn_left(steer_speed)
                 else:
                     if steering_angle < 85:
                         motor_turn_right(steer_speed)
