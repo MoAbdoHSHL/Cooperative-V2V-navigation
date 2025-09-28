@@ -88,29 +88,34 @@ def smooth_ramp(start, end, steps, i):
     return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
 
 
-def motor_turn_right(speed=60, ramp_time=0.001, step_delay=0.003, start_speed=20):
+# ⭐⭐ REPLACE THESE FUNCTIONS IN PUB CODE ⭐⭐
+
+def motor_turn_right(speed=40, ramp_time=0.05, step_delay=0.01, start_speed=25):
+    global lane_left_active
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
     GPIO.output(IN4, GPIO.HIGH)   # Right forward
-
-    steps = int(ramp_time / step_delay)  
+    
+    steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
-        # Left motor ramps DOWN
+        # interrupt ramp if lane is gone (you can add this logic later)
+        # if not lane_left_active:
+        #     break
+            
+        # Smooth ramping for both motors
         left_speed = smooth_ramp(speed, speed * 0.5, steps, i)
-        pwmA.ChangeDutyCycle(left_speed)
-
-        # Right motor ramps UP
         right_speed = smooth_ramp(start_speed, speed, steps, i)
+        pwmA.ChangeDutyCycle(left_speed)
         pwmB.ChangeDutyCycle(min(right_speed * RIGHT_MOTOR_FACTOR, 100))
-
         time.sleep(step_delay)
-
+    
+    # Final speeds after ramp
     pwmA.ChangeDutyCycle(speed * 0.3)
     pwmB.ChangeDutyCycle(min(speed * RIGHT_MOTOR_FACTOR, 100))
 
-
-def motor_turn_left(speed=75, ramp_time=0.001, step_delay=0.003, start_speed=25):
+def motor_turn_left(speed=70, ramp_time=0.05, step_delay=0.01, start_speed=5):
+    global lane_right_active
     GPIO.output(IN1, GPIO.LOW)
     GPIO.output(IN2, GPIO.HIGH)   # Left forward
     GPIO.output(IN3, GPIO.LOW)
@@ -118,17 +123,18 @@ def motor_turn_left(speed=75, ramp_time=0.001, step_delay=0.003, start_speed=25)
 
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
-        # Right motor ramps DOWN
-        right_speed = smooth_ramp(speed, speed * 0.5 , steps, i)
-        pwmB.ChangeDutyCycle(right_speed)
-
-        # Left motor ramps UP
+        # if not lane_right_active:
+        #     break
+            
+        # Smooth ramping for both motors
         left_speed = smooth_ramp(start_speed, speed, steps, i)
+        right_speed = smooth_ramp(start_speed * 0.5, speed * 0.3, steps, i)
         pwmA.ChangeDutyCycle(left_speed)
-
+        pwmB.ChangeDutyCycle(right_speed)
         time.sleep(step_delay)
 
-    pwmA.ChangeDutyCycle(speed)
+    # Final speeds after ramp
+    pwmA.ChangeDutyCycle(speed * 0.8)
     pwmB.ChangeDutyCycle(speed * 0.3)
 
 
@@ -255,14 +261,30 @@ def setup_mqtt():
     return client
 
 def mqtt_publisher_thread():
-    global last_detected_class, new_detection, running
+    global last_detected_class, new_detection, running, stop_requested
     client = setup_mqtt()
+    last_lidar_state = False
+    last_class_state = "clear"
+    
     while running:
         with mqtt_lock:
-            if new_detection and last_detected_class:
-                client.publish(TOPIC, last_detected_class)
-                print(f"MQTT sent: {last_detected_class}")
+            current_lidar_state = stop_requested
+            current_class_state = last_detected_class or "clear"
+            
+            # Send message if ANY state changed
+            if (current_lidar_state != last_lidar_state or 
+                current_class_state != last_class_state or 
+                new_detection):
+                
+                # Create combined message
+                message = f"lidar:{1 if current_lidar_state else 0},class:{current_class_state}"
+                client.publish(TOPIC, message)
+                print(f"MQTT sent: {message}")
+                
+                last_lidar_state = current_lidar_state
+                last_class_state = current_class_state
                 new_detection = False
+                
         time.sleep(0.1)
     client.disconnect()
 
@@ -297,13 +319,13 @@ def process_frame(frame, model):
             new_detection = True
             print(f"DETECTED: {detected_class} -> Stopping + MQTT STOP")
         else:
-            # ✅ No detections from camera
+            # ✅ No detections from camera - clear the stop flag
             last_detected_class = "clear"
             new_detection = True
-            print("Camera clear")
+            object_detected = False  # ⭐⭐ ADD THIS LINE ⭐⭐
+            print("Camera clear - path clear")
 
     return annotated_frame
-
 
 ############ here ######
 def preprocess_frame(frame):
