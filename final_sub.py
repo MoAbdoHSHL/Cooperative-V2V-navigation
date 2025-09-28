@@ -86,7 +86,7 @@ def motor_stop():
     GPIO.output(IN4, GPIO.LOW)
     pwmA.ChangeDutyCycle(0)
     pwmB.ChangeDutyCycle(0)
-
+    
 def smooth_ramp(start, end, steps, i):
     return start + (end - start) * (1 - math.cos(math.pi * i / steps)) / 2
 
@@ -173,9 +173,10 @@ def read_frame():
                     dist = uart[2] + (uart[3] << 8)
                     strength = uart[4] + (uart[5] << 8)
                     return dist, strength
-
 def lidar_loop():
     global scan_data, stop_on_spot, running
+    SAFE_DISTANCE_CM = 30  # stop before hitting the object
+
     while running:
         try:
             dist, strength = read_frame()
@@ -184,8 +185,7 @@ def lidar_loop():
                 with data_lock:
                     scan_data[0] = {'distance': min(dist, 200), 'strength': strength, 'timestamp': time.time()}
 
-            # STOP detection
-            if 0 < dist <= 30:
+            if 0 < dist <= SAFE_DISTANCE_CM:
                 if not stop_on_spot:
                     print(f"[LIDAR] Object detected at {dist} cm -> STOP")
                 stop_on_spot = True
@@ -194,7 +194,7 @@ def lidar_loop():
                     print(f"[LIDAR] Path clear ({dist} cm) -> RESUME")
                 stop_on_spot = False
 
-            time.sleep(0.002)
+            time.sleep(0.01)
         except Exception as e:
             print(f"LIDAR error: {e}")
             time.sleep(0.01)
@@ -316,18 +316,21 @@ def detect_lanes(frame):
     return steering_angle, debug_img, both, left, right
 stop_on_spot = False  # global flag
 
+mqtt_stop = False
+local_stop = False
+
 def on_message(client, userdata, msg):
-    global stop_on_spot
+    global mqtt_stop
     payload = msg.payload.decode().lower()
     print(f"MQTT Received: {payload}")
+    
     if payload != "clear":
-        stop_on_spot = True
+        mqtt_stop = True
         motor_stop()
-        print(">>> STOP ON SPOT ACTIVATED")
+        print(">>> MQTT STOP ACTIVATED")
     else:
-        stop_on_spot = False
-        print(">>> RESUME DRIVING")
-
+        mqtt_stop = False
+        print(">>> MQTT CLEAR")
 
 
 
@@ -345,12 +348,11 @@ def mqtt_subscriber_thread():
 stop_until = 0
 
 def process_frame(frame, model):
-    global last_detected_class, stop_until, stop_on_spot
+    global last_detected_class, local_stop
     results = model(frame, imgsz=160, conf=0.5, half=True, verbose=False)
     result = results[0]
     annotated_frame = frame.copy()
     detected_class = None
-    
 
     for box in result.boxes:
         cls_id = int(box.cls[0])
@@ -364,17 +366,15 @@ def process_frame(frame, model):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             break
 
-    # Extend stop timer only if object detected
+    # Update local stop flag
     if detected_class:
         last_detected_class = detected_class
-        stop_on_spot = True   # keep stopping until object disappears
+        local_stop = True
     else:
         last_detected_class = "clear"
-        stop_on_spot = False
-
+        local_stop = False
 
     return annotated_frame
-
 
 
 # ---- Main ----
@@ -404,12 +404,13 @@ def main():
     lidar_thread.daemon = True
     lidar_thread.start()
 
+
+
     try:
         frame_count = 0
         base_speed = 20
         steer_speed = 25
 
-        # Main driving loop
         while True:
             frame = frame_thread.get_frame()
             if frame is None:
@@ -418,24 +419,29 @@ def main():
             annotated = process_frame(frame, model)
             steering_angle, lane_debug, both_lanes, left_lane, right_lane = detect_lanes(frame)
 
-            if stop_on_spot:
+            # Combine all stop conditions
+            should_stop = stop_on_spot or mqtt_stop or local_stop
+            
+            if should_stop:
                 motor_stop()
-                # Skip all other driving
+                print(f"🛑 STOPPED - Reasons: LIDAR={stop_on_spot}, MQTT={mqtt_stop}, Local={local_stop}")
+                time.sleep(0.1)
+                continue
+
+            # Normal driving logic
+            if both_lanes:
+                motor_forward(base_speed, base_speed)
+            elif left_lane:
+                motor_turn_right(steer_speed)
+            elif right_lane:
+                motor_turn_left(steer_speed)
             else:
-                # Normal lane-following logic
-                if both_lanes:
-                    motor_forward(base_speed, base_speed)
-                elif left_lane:
+                if steering_angle < 85:
                     motor_turn_right(steer_speed)
-                elif right_lane:
+                elif steering_angle > 95:
                     motor_turn_left(steer_speed)
                 else:
-                    if steering_angle < 85:
-                        motor_turn_right(steer_speed)
-                    elif steering_angle > 95:
-                        motor_turn_left(steer_speed)
-                    else:
-                        motor_forward(base_speed, base_speed)
+                    motor_forward(base_speed, base_speed)
 
 
             # Display frames
