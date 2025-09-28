@@ -62,6 +62,9 @@ HEADER = 0x59
 object_detected = False
 stop_requested = False
 running = True
+lidar_stop = False  
+mqtt_stop = False   
+local_stop = False  
 
 # ---- MQTT lock ----
 mqtt_lock = threading.Lock()
@@ -93,7 +96,6 @@ def smooth_ramp(start, end, steps, i):
 # Add these globals somewhere in your code
 lane_left_active = False
 lane_right_active = False
-stop_on_spot = False  # already exists
 
 def motor_turn_right(speed=40, ramp_time=0.05, step_delay=0.01, start_speed=25):
     global lane_left_active
@@ -104,7 +106,7 @@ def motor_turn_right(speed=40, ramp_time=0.05, step_delay=0.01, start_speed=25):
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
         # interrupt ramp if lane is gone
-        if not lane_left_active or stop_on_spot:
+        if not lane_left_active:
             break
         left_speed = smooth_ramp(speed, speed * 0.5, steps, i)
         right_speed = smooth_ramp(start_speed, speed, steps, i)
@@ -124,7 +126,7 @@ def motor_turn_left(speed=70, ramp_time=0.05, step_delay=0.01, start_speed=5):
 
     steps = int(ramp_time / step_delay)
     for i in range(1, steps + 1):
-        if not lane_right_active or stop_on_spot:
+        if not lane_right_active:
             break
         # Ramp left and right motors gradually
         left_speed  = smooth_ramp(start_speed, speed, steps, i)
@@ -173,33 +175,63 @@ def read_frame():
                     dist = uart[2] + (uart[3] << 8)
                     strength = uart[4] + (uart[5] << 8)
                     return dist, strength
-def lidar_loop():
-    global scan_data, stop_on_spot, running
-    SAFE_DISTANCE_CM = 30  # stop before hitting the object
+import random  # ⭐⭐ ADD THIS IMPORT ⭐⭐
 
+def lidar_loop():
+    global scan_data, running, lidar_stop
+    SAFE_DISTANCE_CM = 30
+    # ⭐⭐ ADD FILTERING VARIABLES ⭐⭐
+    distance_buffer = []
+    BUFFER_SIZE = 3
+    consecutive_clear_readings = 0
+    REQUIRED_CLEAR_READINGS = 2
+    
     while running:
         try:
             dist, strength = read_frame()
 
+            # ⭐⭐ FILTER OUT INVALID READINGS ⭐⭐
+            if dist == 0 or dist > 12000:  # Filter obviously wrong readings
+                continue
+                
             if 5 <= dist <= 400:
                 with data_lock:
                     scan_data[0] = {'distance': min(dist, 200), 'strength': strength, 'timestamp': time.time()}
 
-            if 0 < dist <= SAFE_DISTANCE_CM:
-                if not stop_on_spot:
-                    print(f"[LIDAR] Object detected at {dist} cm -> STOP")
-                stop_on_spot = True
+            # ⭐⭐ USE MOVING AVERAGE FOR MORE STABLE READINGS ⭐⭐
+            distance_buffer.append(dist)
+            if len(distance_buffer) > BUFFER_SIZE:
+                distance_buffer.pop(0)
+            
+            avg_distance = sum(distance_buffer) / len(distance_buffer)
+            
+            # ⭐⭐ ADD STRENGTH VALIDATION ⭐⭐
+            MIN_STRENGTH = 100  # Minimum signal strength for reliable reading
+            
+            # DEBUG: Print distance occasionally
+            if random.random() < 0.05:  # Print ~5% of readings for better debugging
+                print(f"[LIDAR] Dist: {dist}cm, Avg: {avg_distance:.1f}cm, Strength: {strength}, Stop: {lidar_stop}")
+
+            # ⭐⭐ IMPROVED STOP LOGIC WITH HYSTERESIS ⭐⭐
+            if 0 < avg_distance <= SAFE_DISTANCE_CM and strength >= MIN_STRENGTH:
+                if not lidar_stop:
+                    consecutive_clear_readings = 0
+                    lidar_stop = True
+                    print(f"[LIDAR] 🛑 Object at {avg_distance:.1f}cm (strength: {strength}) -> STOP")
             else:
-                if stop_on_spot:
-                    print(f"[LIDAR] Path clear ({dist} cm) -> RESUME")
-                stop_on_spot = False
+                if lidar_stop:
+                    consecutive_clear_readings += 1
+                    if consecutive_clear_readings >= REQUIRED_CLEAR_READINGS:
+                        lidar_stop = False
+                        print(f"[LIDAR] ✅ Path clear ({avg_distance:.1f}cm) -> RESUME")
+                        consecutive_clear_readings = 0
+                else:
+                    consecutive_clear_readings = 0
 
             time.sleep(0.01)
         except Exception as e:
             print(f"LIDAR error: {e}")
             time.sleep(0.01)
-
-
 
 # ---- Camera & model ----
 def initialize_camera():
@@ -314,23 +346,40 @@ def detect_lanes(frame):
     height, width = cleaned_mask.shape[:2]
     steering_angle, both, left, right = calculate_steering(left_lane,right_lane,width,height)
     return steering_angle, debug_img, both, left, right
-stop_on_spot = False  # global flag
-
-mqtt_stop = False
-local_stop = False
-
+# Add these with other global variables in SUB code
+mqtt_lidar_stop = False      # LiDAR stop from other car
+mqtt_class_stop = False      # Class detection from other car
 def on_message(client, userdata, msg):
-    global mqtt_stop
-    payload = msg.payload.decode().lower()
-    print(f"MQTT Received: {payload}")
+    global mqtt_stop, mqtt_lidar_stop, mqtt_class_stop
     
-    if payload != "clear":
-        mqtt_stop = True
-        motor_stop()
-        print(">>> MQTT STOP ACTIVATED")
-    else:
-        mqtt_stop = False
-        print(">>> MQTT CLEAR")
+    try:
+        payload = msg.payload.decode()
+        print(f"MQTT Received: {payload}")
+        
+        # Parse the combined message
+        if "lidar:" in payload and "class:" in payload:
+            lidar_part = payload.split(",")[0]  # "lidar:1" or "lidar:0"
+            class_part = payload.split(",")[1]  # "class:pathholde" or "class:clear"
+            
+            lidar_stop_received = int(lidar_part.split(":")[1]) == 1
+            class_received = class_part.split(":")[1]
+            
+            # Update stop flags based on received data
+            mqtt_lidar_stop = lidar_stop_received
+            mqtt_class_stop = class_received != "clear"
+            
+            print(f"📡 MQTT Parsed - LiDAR: {'STOP' if mqtt_lidar_stop else 'GO'}, Class: {class_received}")
+            
+            # Stop if either LiDAR OR class detection from other car
+            if mqtt_lidar_stop or mqtt_class_stop:
+                mqtt_stop = True
+                print(">>> MQTT STOP ACTIVATED (LiDAR or Class from other car)")
+            else:
+                mqtt_stop = False
+                print(">>> MQTT CLEAR (both clear from other car)")
+                
+    except Exception as e:
+        print(f"Error parsing MQTT message: {e}")
 
 
 
@@ -381,9 +430,6 @@ def process_frame(frame, model):
 def main():
     global running
 
-    # Timer for stopping
-    stop_until = 0
-
     # Start MQTT subscriber thread
     mqtt_thread = threading.Thread(target=mqtt_subscriber_thread)
     mqtt_thread.daemon = True
@@ -404,12 +450,13 @@ def main():
     lidar_thread.daemon = True
     lidar_thread.start()
 
-
-
     try:
         frame_count = 0
         base_speed = 20
         steer_speed = 25
+        is_stopped = False
+        stop_start_time = 0
+        MIN_STOP_TIME = 1.0  # Minimum stop time in seconds
 
         while True:
             frame = frame_thread.get_frame()
@@ -419,37 +466,66 @@ def main():
             annotated = process_frame(frame, model)
             steering_angle, lane_debug, both_lanes, left_lane, right_lane = detect_lanes(frame)
 
-            # Combine all stop conditions
-            should_stop = stop_on_spot or mqtt_stop or local_stop
+            # ⭐⭐ IMPROVED STOP LOGIC WITH TIMING ⭐⭐
+            should_stop = lidar_stop or mqtt_stop or local_stop
             
-            if should_stop:
+            current_time = time.time()
+            
+            # If we need to stop but aren't currently stopped
+            if should_stop and not is_stopped:
                 motor_stop()
-                print(f"🛑 STOPPED - Reasons: LIDAR={stop_on_spot}, MQTT={mqtt_stop}, Local={local_stop}")
-                time.sleep(0.1)
-                continue
-
-            # Normal driving logic
-            if both_lanes:
-                motor_forward(base_speed, base_speed)
-            elif left_lane:
-                motor_turn_right(steer_speed)
-            elif right_lane:
-                motor_turn_left(steer_speed)
-            else:
-                if steering_angle < 85:
+                is_stopped = True
+                stop_start_time = current_time
+                print(f"🛑 STOPPED - LIDAR:{lidar_stop}, MQTT:{mqtt_stop}, Local:{local_stop}")
+            
+            # If we are stopped
+            elif is_stopped:
+                # Check if we've been stopped for minimum time and path is clear
+                time_stopped = current_time - stop_start_time
+                if time_stopped >= MIN_STOP_TIME and not should_stop:
+                    print("✅ Path clear! Resuming navigation...")
+                    is_stopped = False
+                else:
+                    if time_stopped < MIN_STOP_TIME:
+                        print(f"⏳ Minimum stop time: {MIN_STOP_TIME - time_stopped:.1f}s remaining")
+                    else:
+                        print(f"⏳ Waiting... LIDAR:{lidar_stop}, MQTT:{mqtt_stop}, Local:{local_stop}")
+                    motor_stop()
+                    time.sleep(0.1)
+                    continue
+            
+            # If not stopped, drive normally
+            if not is_stopped:
+                # ⭐⭐ ADD SAFETY CHECK - DOUBLE CHECK LIDAR BEFORE MOVING ⭐⭐
+                if lidar_stop:
+                    print("⚠️  Safety override: LiDAR detected obstacle during movement!")
+                    motor_stop()
+                    is_stopped = True
+                    stop_start_time = current_time
+                    continue
+                    
+                if both_lanes:
+                    motor_forward(base_speed, base_speed)
+                elif left_lane:
                     motor_turn_right(steer_speed)
-                elif steering_angle > 95:
+                elif right_lane:
                     motor_turn_left(steer_speed)
                 else:
-                    motor_forward(base_speed, base_speed)
+                    if steering_angle < 85:
+                        motor_turn_right(steer_speed)
+                    elif steering_angle > 95:
+                        motor_turn_left(steer_speed)
+                    else:
+                        motor_forward(base_speed, base_speed)
 
-
-            # Display frames
+            # Display frames with status information
+            status_text = f"LIDAR: {'STOP' if lidar_stop else 'GO'}, State: {'STOPPED' if is_stopped else 'MOVING'}"
+            cv2.putText(annotated, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
             cv2.imshow("Road Hazard Detection", annotated)
             cv2.imshow("Lane Detection", lane_debug)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
-
 
     finally:
         running = False
@@ -463,7 +539,5 @@ def main():
         camera.stop()
         cv2.destroyAllWindows()
         ser.close()
-
-
 if __name__ == "__main__":
     main()
