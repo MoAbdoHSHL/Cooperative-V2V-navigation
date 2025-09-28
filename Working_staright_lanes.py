@@ -196,6 +196,7 @@ def lidar_loop():
                     }
             if 0 < dist <= 30:
                 stop_requested = True
+                
             else:
                 stop_requested = False
             time.sleep(0.002)
@@ -218,7 +219,7 @@ def initialize_camera():
     return picam2
 
 def initialize_model():
-    model = YOLO("/home/mohamed/Desktop/Code/runs/detect/train2/weights/best.pt").to("cpu")
+    model = YOLO("/home/mohamed/Cooperative-V2V-navigation/runs/detect/train2/weights/best.pt").to("cpu")
     model.fuse()
     model.amp = True
     _ = model(np.zeros((160, 160, 3), dtype=np.uint8), imgsz=160, verbose=False)
@@ -290,20 +291,16 @@ def process_frame(frame, model):
 
     with mqtt_lock:
         if detected_class:  
-            # 🚨 Object detected -> request stop (keeps motor stopped in main loop)
+            # 🚨 Object detected -> request stop
             last_detected_class = detected_class
-            stop_requested = True
             object_detected = True
             new_detection = True
             print(f"DETECTED: {detected_class} -> Stopping + MQTT STOP")
-            motor_stop()
         else:
-            # ✅ No detections -> release stop
+            # ✅ No detections from camera
             last_detected_class = "clear"
-            stop_requested = False
-            object_detected = False
             new_detection = True
-            print("CLEAR -> Resume driving + MQTT CLEAR")
+            print("Camera clear")
 
     return annotated_frame
 
@@ -427,7 +424,6 @@ def detect_lanes(frame):
 def main():
     global running, stop_requested, object_detected
     
-   
     mqtt_thread = threading.Thread(target=mqtt_publisher_thread)
     mqtt_thread.daemon = True
     mqtt_thread.start()
@@ -449,6 +445,7 @@ def main():
         frame_count = 0
         base_speed = 18
         steer_speed = 30
+        is_stopped = False
         
         while True:
             frame = frame_thread.get_frame()
@@ -464,7 +461,32 @@ def main():
             # Get lane detection results
             steering_angle, lane_debug, both_lanes, left_lane, right_lane = detect_lanes(frame)
             
-            if not stop_requested:
+            # Check BOTH conditions: LiDAR OR object detection
+            lidar_stop = stop_requested  # From LiDAR (distance <= 30cm)
+            camera_stop = object_detected  # From YOLO (any class detected)
+            
+            should_stop = lidar_stop or camera_stop
+            
+            # If we need to stop but aren't currently stopped
+            if should_stop and not is_stopped:
+                motor_stop()
+                is_stopped = True
+                print(f"🛑 STOPPED: LiDAR={lidar_stop}, Camera={camera_stop}")
+                print("Waiting for clear path...")
+            
+            # If we are stopped, check if we can resume
+            elif is_stopped:
+                # Check if BOTH conditions are now clear
+                if not lidar_stop and not camera_stop:
+                    print("✅ Path clear! Resuming navigation...")
+                    is_stopped = False
+                else:
+                    print(f"⏳ Waiting... LiDAR_clear={not lidar_stop}, Camera_clear={not camera_stop}")
+                    motor_stop()  # Ensure we remain stopped
+                    time.sleep(0.1)
+            
+            # If not stopped, drive normally
+            if not is_stopped:
                 # Drive forward if both lanes detected
                 if both_lanes:
                     motor_forward(base_speed, base_speed)
@@ -486,16 +508,7 @@ def main():
                         time.sleep(0.5)
                     else:
                         motor_forward(base_speed, base_speed)
-            else:
-                motor_stop()
-                if not object_detected:
-                    stop_requested = False
-                    time.sleep(0.1)
-                else:
-                    print("Object detected - stopped!")
-                    time.sleep(5)
-                    object_detected = False
-                    stop_requested = False
+
             cv2.imshow("Road Hazard Detection", annotated)
             cv2.imshow("Lane Detection", lane_debug)
             if cv2.waitKey(1) & 0xFF == ord("q"):
